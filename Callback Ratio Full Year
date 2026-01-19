@@ -1,20 +1,30 @@
 DECLARE @YearStart DATE = DATEFROMPARTS(YEAR(GETDATE()) - 1, 1, 1);  -- Jan 1 of last year
 DECLARE @YearEnd   DATE = DATEADD(YEAR, 1, @YearStart);              -- Jan 1 of this year
+DECLARE @YearLastDay DATE = DATEADD(DAY, -1, @YearEnd);              -- Dec 31 of last year
 
--- Find the Sunday on/before Jan 1 (DATEFIRST-safe using a known Sunday anchor: 1900-01-07)
-DECLARE @FirstSunday DATE =
-    DATEADD(DAY, - (DATEDIFF(DAY, '19000107', @YearStart) % 7), @YearStart);
+-- Anchor date that is a Sunday (1900-01-07). Used to compute day-of-week in a DATEFIRST-safe way.
+DECLARE @SundayAnchor DATE = '19000107';
 
 WITH Weeks AS (
+    -- Start at Jan 1 of last year (first week may be partial)
     SELECT
-        @FirstSunday AS week_start,
-        DATEADD(DAY, 6, @FirstSunday) AS week_end
+        @YearStart AS week_start,
+        CASE
+            WHEN DATEADD(DAY, 6 - (DATEDIFF(DAY, @SundayAnchor, @YearStart) % 7), @YearStart) > @YearLastDay
+                THEN @YearLastDay
+            ELSE DATEADD(DAY, 6 - (DATEDIFF(DAY, @SundayAnchor, @YearStart) % 7), @YearStart)
+        END AS week_end
     UNION ALL
+    -- Next week starts the day after the previous week ends (will be Sunday after week 1)
     SELECT
-        DATEADD(DAY, 7, week_start),
-        DATEADD(DAY, 13, week_start)
+        DATEADD(DAY, 1, week_end) AS week_start,
+        CASE
+            WHEN DATEADD(DAY, 6 - (DATEDIFF(DAY, @SundayAnchor, DATEADD(DAY, 1, week_end)) % 7), DATEADD(DAY, 1, week_end)) > @YearLastDay
+                THEN @YearLastDay
+            ELSE DATEADD(DAY, 6 - (DATEDIFF(DAY, @SundayAnchor, DATEADD(DAY, 1, week_end)) % 7), DATEADD(DAY, 1, week_end))
+        END AS week_end
     FROM Weeks
-    WHERE DATEADD(DAY, 7, week_start) < @YearEnd
+    WHERE week_end < @YearLastDay
 )
 SELECT
     w.week_start,
@@ -24,17 +34,16 @@ SELECT
     CAST(
         CASE
             WHEN COUNT(v.service_order_key) = 0 THEN 0.0
-            ELSE
-                CAST(SUM(CASE WHEN v.subtotal = 0 THEN 1 ELSE 0 END) AS FLOAT)
-                / COUNT(v.service_order_key)
+            ELSE CAST(SUM(CASE WHEN v.subtotal = 0 THEN 1 ELSE 0 END) AS FLOAT)
+                 / COUNT(v.service_order_key)
         END
     AS DECIMAL(6,4)) AS pct_zero_subtotal
 FROM Weeks w
 LEFT JOIN dbo.vr_311 v
     ON v.work_dt >= w.week_start
-   AND v.work_dt <  DATEADD(DAY, 7, w.week_start)   -- Sunday inclusive, next Sunday exclusive
+   AND v.work_dt <  DATEADD(DAY, 1, w.week_end)   -- inclusive of week_end day
    AND v.work_dt >= @YearStart
-   AND v.work_dt <  @YearEnd                         -- only count services that occurred in last year
+   AND v.work_dt <  @YearEnd                      -- hard-stop at Jan 1 of this year
 GROUP BY
     w.week_start, w.week_end
 ORDER BY
